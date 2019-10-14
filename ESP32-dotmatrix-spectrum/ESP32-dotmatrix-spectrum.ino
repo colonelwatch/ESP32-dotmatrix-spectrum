@@ -1,0 +1,269 @@
+// Copyright 2019 colonelwatch
+
+#include <SPI.h>
+#include "fix_fft.h"
+#include "soc/timer_group_struct.h"
+#include "soc/timer_group_reg.h"
+
+// Pin mappings
+#define ENABLEPIN 5
+#define LATCHPIN 19
+// Data pin is hardware MOSI, or 23
+// Clock pin is hardware CLK, or 18
+#define A_PIN 2
+#define B_PIN 4
+#define C_PIN 16
+#define D_PIN 17
+// Microphone input is 39
+// 3.5mm input is 36
+
+// User-configurable settings
+#define CAP 90                        // Use to map post-processed FFT output to
+                                      //  display (raise for longer bars, lower
+                                      //  to shorter bars)
+#define TIME_FACTOR 25                // Configures rise smoothing function (raise
+                                      //  for smoother output, lower for dynamic
+                                      //  output)
+#define TIME_FACTOR2 25               // Configures fall smoothing function (raise
+                                      //  for smoother output, lower for dynamic
+                                      //  output)
+#define SAMPLING_FREQUENCY 10000      // Frequency at which sampling interrupt will
+                                      //  be called, actual output range will be
+                                      //  limited to half because of Nyquist.
+#define SENSITIVITY 1.45              // FFT output multiplier before post-processing.
+#define DEBOUNCE 500                  // Debounce time in milliseconds for BOOT button
+
+// Global constants
+const float coeff = 1./TIME_FACTOR;                 // Coefficients for rise smoothing
+const float anti_coeff = (TIME_FACTOR-1.)/TIME_FACTOR;
+const float coeff2 = 1./TIME_FACTOR2;               // Coefficients for fall smoothing
+const float anti_coeff2 = (TIME_FACTOR2-1.)/TIME_FACTOR2;
+const int sample_period = 1000000/SAMPLING_FREQUENCY;
+
+// Global variables
+volatile int analogBuffer[128] = {0};         // Circular buffer for storing analogReads
+volatile int analogBuffer_index = 0;          // Write index for analogBuffer, also used for reads
+volatile bool analogBuffer_availible = true;  // Memory busy flag for analogBuffer
+uint8_t displayBuffer[128] = {0};       // Stores LED matrix output
+bool displayBuffer_availible = true;    // Memory busy flag for display buffer
+int inputPin = 39;      // ADC pin, either 36(aux) or 39(microphone)
+
+// Function prototypes, explanations at bottom
+void flashDisplay(uint8_t frame[128], int interval = 5);
+void analogBuffer_store(int val);
+
+// Core 0 thread
+TaskHandle_t Task1;
+void Task1code(void* pvParameters){
+  int milliseconds = millis();
+  while(true){
+    // Debouncing code that checks if the BOOT button has been pressed and, if
+    // so, changes the audio source between the microphone and the 3.5mm jack
+    if(digitalRead(0) == LOW && millis() > milliseconds + DEBOUNCE){
+      milliseconds = millis();
+      if(inputPin == 36) inputPin = 39;
+      else inputPin = 36;
+    }
+    
+    // Passes working display buffer and updates second buffer. If the display
+    // buffer is being worked on by other core, then passes second buffer.
+    // Flickering seems to be a serious problem in excess of 5.
+    // TODO: Find cause behind flickering
+    static uint8_t doubleBuffer[128] = {0};
+    if(displayBuffer_availible){
+      flashDisplay(displayBuffer, 5);
+      for(int i = 0; i < 128; i++) doubleBuffer[i] = displayBuffer[i];
+    }
+    else{
+      flashDisplay(doubleBuffer, 5);
+    }
+  }
+}
+
+// Core 1 Interrupt thread
+hw_timer_t * timer = NULL;
+void IRAM_ATTR onTimer(){
+  // Basic function is to record new values for circular analogBuffer, but in cases where
+  // the interrupt is triggered while the buffer is being read from, for the sake of
+  // accuracy the values must be stored in a contingency buffer. Then, when the interrupt
+  // is triggered and the reading is over, the values are transferred from the contingency
+  // buffer to analogBuffer.
+  static int contigBuffer[128];
+  static int contigBuffer_index = 0;
+  if(!analogBuffer_availible){
+    contigBuffer[contigBuffer_index] = analogRead(inputPin) - 2048;
+    contigBuffer_index++;
+  }
+  else{
+    for(int i = 0; i < contigBuffer_index; i++)
+      analogBuffer_store(contigBuffer[i]);
+    contigBuffer_index = 0;
+    analogBuffer_store(analogRead(inputPin) - 2048);
+  }
+}
+
+// Core 1 thread
+void setup(){
+  SPI.begin();
+  SPI.setDataMode(SPI_MODE3);
+
+  pinMode(LATCHPIN, OUTPUT);
+  pinMode(ENABLEPIN, OUTPUT);
+  pinMode(A_PIN, OUTPUT);
+  pinMode(B_PIN, OUTPUT);
+  pinMode(C_PIN, OUTPUT);
+  pinMode(D_PIN, OUTPUT);
+  
+  pinMode(39, INPUT);
+  pinMode(36, INPUT);
+  pinMode(0, INPUT);
+
+  // Intializes interrupt at user-set frequency
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, sample_period, true); // 1000000 * 1 us = 1 s, use this conversion
+  timerAlarmEnable(timer);
+
+  // Intializes Core 0
+  delay(500);
+  xTaskCreatePinnedToCore(
+              Task1code,   /* Task function. */
+              "Task1",     /* name of task. */
+              10000,       /* Stack size of task */
+              NULL,        /* parameter of the task */
+              0,           /* priority of the task */
+              &Task1,      /* Task handle to keep track of created task */
+              0);          /* pin task to core 0 */ 
+}
+
+void loop(){
+  int8_t vReal[128];
+  int8_t vImag[128] = {0};
+  static float buff[64];
+  int preprocess[128];
+  static int count = 0;
+  
+  // Reads entire analog buffer for FFT calculations. This means a LOT of
+  // redundant data but its necessary to because using new data every time
+  // requires very long delays in total when recording at low frequencies.
+  // (This really should be a discrete function, but I don't know how to
+  // work with arrays in functions.)
+  analogBuffer_availible = false;   // Closes off buffer to prevent corruption
+  // Reads entire circular buffer, starting from analogBuffer_index
+  for(int i = 0; i < 128; i++){
+    preprocess[i] = analogBuffer[(i+analogBuffer_index)%128] / 16;
+  }
+  analogBuffer_availible = true;    // Restores access to buffer
+
+  // Finds the average, which represents the DC bias, and subtracts it. This
+  // SHOULD produce usable 0th bin values (currenty 0.1uF capacitors in signal
+  // path block low frequencies because they seemed to be really large anyway?)
+  int sum = 0;
+  for(int i = 0; i < 128; i++) sum += preprocess[i];
+  int avg = sum / 128;
+  for(int i = 0; i < 128; i++) vReal[i] = preprocess[i] - avg;
+
+  fix_fft(vReal,vImag,7,0); // Performs FFT calculations
+
+  // Original post-processing code to be refactored later
+  uint8_t postprocess[64];
+  for(int i = 0; i < 128; i++) displayBuffer[i] = 0;
+  for(int iCol = 0; iCol < 64; iCol++){
+    // Combining imaginary and real data into a unified array
+    postprocess[iCol] = SENSITIVITY*sqrt(vReal[iCol] * vReal[iCol] + vImag[iCol] * vImag[iCol]);
+    // Logarithmic scaling to create more visible output display height of 16
+    if(postprocess[iCol] > 1) postprocess[iCol] = 40.*log((float)(postprocess[iCol]));
+    else postprocess[iCol] = 0;   // Cuts off negative values before they are calculated
+    //
+    if(postprocess[iCol] > buff[iCol]){
+      // Smoothing by factoring in past data
+      postprocess[iCol] = buff[iCol] * anti_coeff + (float)postprocess[iCol] * coeff;
+      buff[iCol] = postprocess[iCol];       // Storing new output as next frame's past data
+    }
+    else{
+      postprocess[iCol] = buff[iCol] * anti_coeff2 + (float)postprocess[iCol] * coeff2;
+      buff[iCol] = postprocess[iCol];
+    }
+    // Translating output data into column heights, which is entered into the buffer
+    displayBuffer_availible = false;
+    int height = (postprocess[iCol]*16)/CAP;
+    for(int iRow = 0; iRow < 16; iRow++){
+      if(height >= 16-iRow || iRow == 15) displayBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
+    }
+    displayBuffer_availible = true;
+  }
+
+  // Credit goes to akshar001 for this watchdog reset three-liner, which is
+  // necessary because the program exceeds the watchdog's 1000Hz polling
+  // rate.
+  // Github thread: https://github.com/espressif/arduino-esp32/issues/595
+  TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
+  TIMERG0.wdt_feed=1;
+  TIMERG0.wdt_wprotect=0;
+  
+  delay(1);   // Seems to reduce display flicker but slows down
+                            // FFT. TO-DO: Eliminate this line without ruining
+                            // anything
+}
+
+// Function defintions
+
+// Flashes 64*16 HUB12 display with an output specified by the passed array.
+// Reads the array "row" by "row", left to right. (Each row is 64 bits, or
+// 8 uint8_t elements long.) Should be run continuously, so that the higher
+// the flash interval the brighter the display (max unmeasured, but exists),
+// but can be asynchronously executed if needed. Bitbangs HUB12 protocol
+// with hardware SPI and additonal pins.
+void flashDisplay(uint8_t frame[128], int interval){
+  // Flushes data held in shift registers, seems to reduce flickering?
+  digitalWrite(ENABLEPIN, HIGH);
+  for(int i = 0; i < 8; i++) SPI.transfer(0);
+  digitalWrite(LATCHPIN, LOW);
+  digitalWrite(LATCHPIN, HIGH);
+  digitalWrite(ENABLEPIN, LOW);
+  delayMicroseconds(interval);
+  for(uint8_t iRow = 0; iRow < 16; iRow++){
+    // Loads in a row, each element/column holding 8 pixels from left to right
+    uint8_t column[8];
+    for(int iCol = 0; iCol < 8; iCol++) column[iCol] = frame[8*iRow + iCol];
+
+    // Outputting over HUB12
+    digitalWrite(ENABLEPIN, HIGH);  // Turns display off (redundant?)
+    
+    // Sends data column by column, protocol emulated by SPI mode 3
+    for(int iCol = 0; iCol < 8; iCol++) SPI.transfer(column[iCol]);
+    
+    digitalWrite(LATCHPIN, LOW);
+    digitalWrite(LATCHPIN, HIGH);
+    
+    // Outputs row number in binary
+    digitalWrite(A_PIN, iRow & 0b00000001);
+    digitalWrite(B_PIN, (iRow & 0b00000010) >> 1);
+    digitalWrite(C_PIN, (iRow & 0b00000100) >> 2);
+    digitalWrite(D_PIN, (iRow & 0b00001000) >> 3);
+
+    digitalWrite(ENABLEPIN, LOW);   // Turns display back on
+    delayMicroseconds(interval);    // Allow the display to stay on
+    digitalWrite(ENABLEPIN, HIGH);  // Turns display back off because display
+                                    //  has a maximum interval the last row
+                                    //  will be stuck on for otherwise.
+  }
+}
+// Function note: If the maximum is known (or arbitratily set), then one can pwm
+//  that interval to obtain variable brightness but constant execution time (if
+//  needed).
+
+
+// Stores the passed value into a 128-sized circular buffer called analogBuffer,
+//  which is declared as a volatile int array. Uses global volatile int
+//  analogBuffer_index as the write index and reads analogBuffer_availible as
+//  memory flag.
+void analogBuffer_store(int val){
+  analogBuffer[analogBuffer_index] = val;
+
+  // Increments index then uses modulo to limit range
+  analogBuffer_index++;
+  analogBuffer_index %= 128;
+}
+// Function note: Currently, analogBuffer_index is also used as the reference
+// in order to read the entire array in chronological order.
