@@ -1,19 +1,22 @@
 // Copyright 2019 colonelwatch
 
 #include <SPI.h>
+// FFT using 8-bit integers
 #include "fix_fft.h"
+// Used for watchdog reset
 #include "soc/timer_group_struct.h"
 #include "soc/timer_group_reg.h"
 
-// Pin mappings
-#define ENABLEPIN 5
-#define LATCHPIN 19
-// Data pin is hardware MOSI, or 23
-// Clock pin is hardware CLK, or 18
-#define A_PIN 2
-#define B_PIN 4
-#define C_PIN 16
-#define D_PIN 17
+// Pin mappings to HUB08 for DOIT ESP32 DEVKIT V1 (short version)
+#define ENABLEPIN 5   // EN
+#define LATCHPIN 19   // LT
+// Data (R1 or G1) pin is hardware MOSI, or 23
+// Clock (CLK) pin is hardware CLK, or 18
+#define A_PIN 2       // A
+#define B_PIN 4       // B
+#define C_PIN 16      // C
+#define D_PIN 17      // D
+// Don't forget to wire ground!
 // Microphone input is 39
 // 3.5mm input is 36
 
@@ -65,18 +68,17 @@ void Task1code(void* pvParameters){
       else inputPin = 36;
     }
     
-    // Passes working display buffer and updates second buffer. If the display
-    // buffer is being worked on by other core, then passes second buffer.
-    // Flickering seems to be a serious problem in excess of 5.
-    // TODO: Find cause behind flickering
+    // Double-buffered output to display, only updating for new data
+    // Currently much slower than FFT process because uC has to copy over
+    // buffer (458 fps vs 1627.8 FFT's per second), but its already pretty
+    // high
+    // TO-DO? Implement page flipping
     static uint8_t doubleBuffer[128] = {0};
     if(displayBuffer_availible){
-      flashDisplay(displayBuffer, 5);
       for(int i = 0; i < 128; i++) doubleBuffer[i] = displayBuffer[i];
+      displayBuffer_availible = false;
     }
-    else{
-      flashDisplay(doubleBuffer, 5);
-    }
+    flashDisplay(doubleBuffer, 5);
   }
 }
 
@@ -125,7 +127,7 @@ void setup(){
   timerAlarmEnable(timer);
 
   // Intializes Core 0
-  delay(500);
+  displayBuffer_availible = false;
   xTaskCreatePinnedToCore(
               Task1code,   /* Task function. */
               "Task1",     /* name of task. */
@@ -141,19 +143,17 @@ void loop(){
   int8_t vImag[128] = {0};
   static float buff[64];
   int preprocess[128];
-  static int count = 0;
   
   // Reads entire analog buffer for FFT calculations. This means a LOT of
   // redundant data but its necessary to because using new data every time
   // requires very long delays in total when recording at low frequencies.
-  // (This really should be a discrete function, but I don't know how to
-  // work with arrays in functions.)
   analogBuffer_availible = false;   // Closes off buffer to prevent corruption
   // Reads entire circular buffer, starting from analogBuffer_index
   for(int i = 0; i < 128; i++){
     preprocess[i] = analogBuffer[(i+analogBuffer_index)%128] / 16;
   }
   analogBuffer_availible = true;    // Restores access to buffer
+
 
   // Finds the average, which represents the DC bias, and subtracts it. This
   // SHOULD produce usable 0th bin values (currenty 0.1uF capacitors in signal
@@ -163,14 +163,15 @@ void loop(){
   int avg = sum / 128;
   for(int i = 0; i < 128; i++) vReal[i] = preprocess[i] - avg;
 
+
   fix_fft(vReal,vImag,7,0); // Performs FFT calculations
 
-  // Original post-processing code to be refactored later
+
+  // Performs multiple operations: flattening, post-processing, and smoothing
   uint8_t postprocess[64];
-  for(int i = 0; i < 128; i++) displayBuffer[i] = 0;
   for(int iCol = 0; iCol < 64; iCol++){
     // Combining imaginary and real data into a unified array
-    postprocess[iCol] = SENSITIVITY*sqrt(vReal[iCol] * vReal[iCol] + vImag[iCol] * vImag[iCol]);
+    postprocess[iCol] = SENSITIVITY*sqrt(vReal[iCol]*vReal[iCol] + vImag[iCol]*vImag[iCol]);
     // Logarithmic scaling to create more visible output display height of 16
     if(postprocess[iCol] > 1) postprocess[iCol] = 40.*log((float)(postprocess[iCol]));
     else postprocess[iCol] = 0;   // Cuts off negative values before they are calculated
@@ -184,26 +185,23 @@ void loop(){
       postprocess[iCol] = buff[iCol] * anti_coeff2 + (float)postprocess[iCol] * coeff2;
       buff[iCol] = postprocess[iCol];
     }
-    // Translating output data into column heights, which is entered into the buffer
-    displayBuffer_availible = false;
-    int height = (postprocess[iCol]*16)/CAP;
-    for(int iRow = 0; iRow < 16; iRow++){
-      if(height >= 16-iRow || iRow == 15) displayBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
-    }
-    displayBuffer_availible = true;
   }
 
-  // Credit goes to akshar001 for this watchdog reset three-liner, which is
-  // necessary because the program exceeds the watchdog's 1000Hz polling
-  // rate.
+  // Translating output data into column heights, which is entered into the buffer
+  displayBuffer_availible = false;  // Blocks access to display buffer
+  for(int i = 0; i < 128; i++) displayBuffer[i] = 0;
+  for(int iCol = 0; iCol < 64; iCol++){  
+    int height = (postprocess[iCol]*16)/CAP;
+    for(int iRow = 0; iRow < 16; iRow++)
+      if(height >= 16-iRow || iRow == 15) displayBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
+  }
+  displayBuffer_availible = true;   // Restores access to display buffer
+
+  // Credit goes to akshar001 for this watchdog reset three-liner
   // Github thread: https://github.com/espressif/arduino-esp32/issues/595
   TIMERG0.wdt_wprotect=TIMG_WDT_WKEY_VALUE;
   TIMERG0.wdt_feed=1;
   TIMERG0.wdt_wprotect=0;
-  
-  delay(1);   // Seems to reduce display flicker but slows down
-                            // FFT. TO-DO: Eliminate this line without ruining
-                            // anything
 }
 
 // Function defintions
@@ -215,13 +213,6 @@ void loop(){
 // but can be asynchronously executed if needed. Bitbangs HUB12 protocol
 // with hardware SPI and additonal pins.
 void flashDisplay(uint8_t frame[128], int interval){
-  // Flushes data held in shift registers, seems to reduce flickering?
-  digitalWrite(ENABLEPIN, HIGH);
-  for(int i = 0; i < 8; i++) SPI.transfer(0);
-  digitalWrite(LATCHPIN, LOW);
-  digitalWrite(LATCHPIN, HIGH);
-  digitalWrite(ENABLEPIN, LOW);
-  delayMicroseconds(interval);
   for(uint8_t iRow = 0; iRow < 16; iRow++){
     // Loads in a row, each element/column holding 8 pixels from left to right
     uint8_t column[8];

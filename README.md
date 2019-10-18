@@ -1,54 +1,29 @@
-﻿# attiny85-spectrum
+﻿# ESP32-dotmatrix-spectrum
 
 ![Main Image](images/Main.jpg)
 
-The goal of this project is to get smooth, appealing music visualization on the ATTiny85, optimizing around its limited speed and resources (RAM and program memory). Its on ongoing personal project right now which is mostly complete (outside help is still welcome!), but it's otherwise fully functional and ready to be flashed. Some special steps are required, however, and will be listed below. *Thanks goes to redditors stockvu and mashuptwice for their input on time-smoothing.*
+The goal of this Arduino program was initially try implementing the [fix_fft](https://github.com/kosme/fix_fft) library on a 32-bit microcontroller, because it was updated recently to support them, but it has since expanded into its own project. In this case, I used a dual-core ESP32, so I could dedicate a core to driving a 64*16 LED matrix display on the HUB08 protocol. The project is generally complete, but from here on I intend to add unrelated features on my own device, though these features won't go on this repo to keep it clean.
 
 ## Explanation
-The linchpins to enabling music visualization with an ATTiny85 are two libraries: 
+Except for the LED matrix driver and some ESP32-specific lines, this program is generally the same as my precursor project, [attiny85-spectrum](https://github.com/colonelwatch/attiny85-spectrum). However, this time I've implemented a dynamic sampling system that increased the program's output rate by an __order of magnitude__—that is, in most music visualization projects a lot of potential processing time is wasted because the microcontroller must wait on the ADC to collect enough samples for an FFT. One can *try* to fix this by raising the ADC's clock, but this leads to an undesirable increase in the Nyquist frequency for music. Alternatively, the same problem is caused when the sampling is already too fast, and blocking delays are needed to maintain a desired sampling rate.
 
-- kosme's AVR implementation of [fix_fft](https://github.com/kosme/fix_fft), a faster 8-bit integer-based FFT
-- lexus2k's [ssd1306](https://github.com/lexus2k/ssd1306) library and its nanoengine API, which outputs to the OLED in 32x32 chunks because the ATTiny85 can't hold the entire screen in memory
+To eliminate this problem, my solution samples continuously at the desired frequency, rather than all at once. It also recycles a majority of the samples for the next operation because the FFT of any continous set of samples remains valid. So by decoupling the sampling frequency from the ADC frequency and reducing the number of new samples needed, one can use the maximum ADC speed then further cut sampling overhead. The solution works like this:
 
-I had to change the pin assignments in the ssd1306 library to free up an analog-capable pin, ~~and in the fix_fft library I changed the char type buffers into int8_t ones~~. Both modified libraries are availible, and they must be placed in the Arduino libraries folder, overwriting the original ones (keep a backup!). *Recently kosme has updated the fix_fft library to int8_t defintions as well, __I have now included his latest commit instead__.* Additionally, I raised the OSCCAL value to 250, giving me an internal clock of about 30MHz. It's usually used for clock calibration, but it has been used successfully for overclocking. However, it's only found on the ATTiny85 and a few other Atmel MCUs.
+1. Configure an interrupt to fire at a user-set frequency, and the ADC should be at its maximum possible speed.
+2. When the interrupt fires, store the analog reading in a circular buffer. If the interrupt fires while the microcontroller is reading from the buffer, store the reading in a second, contingency buffer, which should be transferred over to the circular buffer at the next interrupt trigger.
+3. Whenever the microcontroller needs a set of samples, read the *entire* circular buffer, starting from the oldest sample. Use a memory busy flag as a signal to the interrupt routine.
 
-The core of the program is a loop of this:
+Before I implemented this method, the ESP32 could perform over 100 fix_fft operations per second; it can now do **1627.8** per second (which exceeded the 458Hz refresh rate of my LED matrix). This dynamic sampling trick can be applied on any microcontroller using interrupts, including the Arduino Uno (after raising the ADC clock).
 
-1. The music is sampled with the ADC at pin 3/A3, which is then mapped to the range that int8_t covers (0 to 1023 -> -128 to 127)
-     * A prescaler of ~~16~~ 32 gives a sampling frequency of about ~~2MHz~~ *now 1MHz* (considering the overclock), so empty while loops are used to maintain the user-set sampling frequency
-2. The average value is subtracted from all samples. This lets the first band represent extremely low frequencies, rather than being swamped with the DC bias
-3. The "fix_fftr" function, which runs twice as fast as and uses half the memory of the "fix_fft" version because it doesn't need imaginary data
-4. The output is reordered, cut off below 0, scaled up, and time-smoothed using the previous output and fixed factors
-5. The modified output is fed into the OLED part-by-part using the nanoengine API
-
-## Components
-
-- ATTiny85
-- SSD1306 OLED Module
-- 3-Pole Audio Jack (1, 2 for pass-through)
-- 2N3904 or other NPN transistor
-- 0.1uF Capacitor
-- Potentiometer, any value above 10k
-- 200 Ohm Resistor (2)
-- 820 Ohm Resistor
-- 100k Ohm Resistor
-- External 5V Power Supply
-
-## Schematic
-
-![Schematic](data/schematic.png)
+## Implementation
+Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. (I accomplished this myself with the 2n3904 amplifier described in attiny85-spectrum.) Wire the ESP32 into the HUB08 interface 64*16 LED matrix, using the pinouts in the .ino file. 
 
 ## Demonstration
 
-[![attiny85-spectrum demonstration](http://img.youtube.com/vi/iyPTCbWjp_4/0.jpg)](https://www.youtube.com/watch?v=iyPTCbWjp_4)
 
-### Enclosure
-
-The STL of the enclosure in the video is included in this repo. Printed on a Monoprice Select Mini V2. See [this](images/Inside.jpg) picture for component placements on a 3x7 protoboard. *Note: The barrel connector wire colors were accidentally swapped⁠—red is ground, and black is 5V⁠. Please correct this if you intend to replicate the entire project!*
 
 ## Limitations/TO-DO
 
-- The fix_fft library uses linear scaling for both frequency and power... and without much resolution in either / ~~*No room for logarithmic scaling? TO-DO: Attempt to implement later.*~~
-- The OLED display regularly shows detached bars that only really appear in still photos / *TO-DO: Find out why*
-    - Apparently has reduced intensity now with recent code changes. Still unexplained though.
+- The LED matrix might be limited to 458Hz because the microcontroller needs time to copy into the second buffer (Test if this is true, and if true attempting a page-flipping system instead)
+	- Alternatively, use a different type of display, since 458Hz is tough to appreciate on such a limited resoluton!
 
