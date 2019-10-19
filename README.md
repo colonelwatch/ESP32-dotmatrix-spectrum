@@ -5,7 +5,7 @@
 The goal of this Arduino program was initially try implementing the [fix_fft](https://github.com/kosme/fix_fft) library on a 32-bit microcontroller, because it was updated recently to support them, but it has since expanded into its own project. In this case, I used a dual-core ESP32, so I could dedicate a core to driving a 64*16 LED matrix display on the HUB08 protocol. The project is generally complete, but from here on I intend to add unrelated features on my own device, though these features won't go on this repo to keep it clean.
 
 ## Explanation
-Except for the LED matrix driver and some ESP32-specific lines, this program is generally the same as my precursor project, [attiny85-spectrum](https://github.com/colonelwatch/attiny85-spectrum). However, this time I've implemented a dynamic sampling system that increased the program's output rate by an __order of magnitude__—that is, in most music visualization projects a lot of potential processing time is wasted because the microcontroller must wait on the ADC to collect enough samples for an FFT. One can *try* to fix this by raising the ADC's clock, but this leads to an undesirable increase in the Nyquist frequency for music. Alternatively, the same problem is caused when the sampling is already too fast, and blocking delays are needed to maintain a desired sampling rate.
+Except for the LED matrix driver and some ESP32-specific lines, this program is generally the same as my precursor project, [attiny85-spectrum](https://github.com/colonelwatch/attiny85-spectrum). However, this time I've implemented a dynamic sampling system that increased the program's output rate by an *order of magnitude*—that is, in most music visualization projects a lot of potential processing time is wasted because the microcontroller must wait on the ADC to collect enough samples for an FFT. One can *try* to fix this by raising the ADC's clock, but this leads to an undesirable increase in the Nyquist frequency for music. Alternatively, the same problem is caused when the sampling is already too fast, and blocking delays are needed to maintain a desired sampling rate.
 
 To eliminate this problem, my solution samples continuously at the desired frequency, rather than all at once. It also recycles a majority of the samples for the next operation because the FFT of any continous set of samples remains valid. So by decoupling the sampling frequency from the ADC frequency and reducing the number of new samples needed, one can use the maximum ADC speed then further cut sampling overhead. The solution works like this:
 
@@ -20,7 +20,7 @@ Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPI
 
 ## Demonstration
 
-
+Demonstration video soon!
 
 ## Limitations/TO-DO
 
