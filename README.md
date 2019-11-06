@@ -13,7 +13,7 @@ To eliminate this problem, my solution samples continuously at the desired frequ
 2. When the interrupt fires, store the analog reading in a circular buffer. If the interrupt fires while the microcontroller is reading from the buffer, store the reading in a second, contingency buffer, which should be transferred over to the circular buffer at the next interrupt trigger.
 3. Whenever the microcontroller needs a set of samples, read the *entire* circular buffer, starting from the oldest sample. Use a memory busy flag as a signal to the interrupt routine.
 
-Before I implemented this method, the ESP32 could perform over 100 fix_fft operations per second; it can now do **1627.8** per second (which exceeded the 458Hz refresh rate of my LED matrix). This dynamic sampling trick can be applied on any microcontroller using interrupts, including the Arduino Uno (after raising the ADC clock).
+Before I implemented this method, the ESP32 could perform over 100 fix_fft operations per second; it can now do **1627.8** per second (which exceeded the ~~458~~1024.2Hz refresh rate of my LED matrix). This dynamic sampling trick can be applied on any microcontroller using interrupts, including the Arduino Uno (after raising the ADC clock).
 
 ## Implementation
 Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. (I accomplished this myself with the 2n3904 amplifier described in attiny85-spectrum.) Wire the ESP32 into the HUB08 interface 64*16 LED matrix, using the pinouts in the .ino file. 

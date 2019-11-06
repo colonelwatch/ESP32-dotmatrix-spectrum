@@ -47,9 +47,12 @@ const int sample_period = 1000000/SAMPLING_FREQUENCY;
 volatile int analogBuffer[128] = {0};         // Circular buffer for storing analogReads
 volatile int analogBuffer_index = 0;          // Write index for analogBuffer, also used for reads
 volatile bool analogBuffer_availible = true;  // Memory busy flag for analogBuffer
-uint8_t displayBuffer[128] = {0};       // Stores LED matrix output
+uint8_t displayBuffer[128] = {0};       // First buffer for storing LED matrix output
+uint8_t doubleBuffer[128]  = {0};       // Second buffer for storing LED matrix output
+uint8_t *readBuffer = doubleBuffer;     // Pointer that specifies which buffer is to be read from
+uint8_t *writeBuffer = displayBuffer;   // Pointer that specifies which buffer is to be written to
 bool displayBuffer_availible = true;    // Memory busy flag for display buffer
-int inputPin = 39;      // ADC pin, either 36(aux) or 39(microphone)
+volatile int inputPin = 39;      // ADC pin, either 36(aux) or 39(microphone)
 
 // Function prototypes, explanations at bottom
 void flashDisplay(uint8_t frame[128], int interval = 5);
@@ -68,17 +71,21 @@ void Task1code(void* pvParameters){
       else inputPin = 36;
     }
     
-    // Double-buffered output to display, only updating for new data
-    // Currently much slower than FFT process because uC has to copy over
-    // buffer (458 fps vs 1627.8 FFT's per second), but its already pretty
-    // high
-    // TO-DO? Implement page flipping
-    static uint8_t doubleBuffer[128] = {0};
+    // Double-buffered output with page flipping to display, only updating for new data
+    // Currently somewhat slowerthan FFT process (1042 fps vs 1627.8 FFT's per second)
+    // because of SPI frequency limitations on the display
     if(displayBuffer_availible){
-      for(int i = 0; i < 128; i++) doubleBuffer[i] = displayBuffer[i];
+      if(readBuffer == doubleBuffer){
+        readBuffer = displayBuffer;
+        writeBuffer = doubleBuffer;
+      }
+      else{
+        readBuffer = doubleBuffer;
+        writeBuffer = displayBuffer;
+      }
       displayBuffer_availible = false;
     }
-    flashDisplay(doubleBuffer, 5);
+    flashDisplay(readBuffer, 5);
   }
 }
 
@@ -108,6 +115,7 @@ void IRAM_ATTR onTimer(){
 void setup(){
   SPI.begin();
   SPI.setDataMode(SPI_MODE3);
+  SPI.setFrequency(40000000);
 
   pinMode(LATCHPIN, OUTPUT);
   pinMode(ENABLEPIN, OUTPUT);
@@ -189,11 +197,11 @@ void loop(){
 
   // Translating output data into column heights, which is entered into the buffer
   displayBuffer_availible = false;  // Blocks access to display buffer
-  for(int i = 0; i < 128; i++) displayBuffer[i] = 0;
+  for(int i = 0; i < 128; i++) writeBuffer[i] = 0;
   for(int iCol = 0; iCol < 64; iCol++){  
     int height = (postprocess[iCol]*16)/CAP;
     for(int iRow = 0; iRow < 16; iRow++)
-      if(height >= 16-iRow || iRow == 15) displayBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
+      if(height >= 16-iRow || iRow == 15) writeBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
   }
   displayBuffer_availible = true;   // Restores access to display buffer
 
