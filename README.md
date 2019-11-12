@@ -18,7 +18,7 @@ Before I implemented this method, the ESP32 could generate 100 fix_fft outputs p
 ## Implementation
 Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. (I managed to input music or a ambient noise by using the below schematic.) Wire the ESP32 into the HUB08 interface 64x16 LED matrix, using the pinouts in the .ino file.
 
-!(Schematic)[images/schematic.png]
+![Schematic](images/schematic.png)
 
 ## Demonstration
 
