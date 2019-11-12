@@ -21,6 +21,13 @@
 // 3.5mm input is 36
 
 // User-configurable settings
+#define COLUMNS_COUNT 64              // Used to determine FFT size and modifies
+                                      //  the flashDisplay function. Must be a
+                                      //  power of 2.
+#define ROWS_COUNT 16                 // Used to modify flashDisplay function.
+                                      //  Likely shouldn't exceed 16 without a
+                                      //  rewrite of flashDisplay (which I cannot
+                                      //  test). Must be a power of 2.
 #define CAP 90                        // Use to map post-processed FFT output to
                                       //  display (raise for longer bars, lower
                                       //  to shorter bars)
@@ -42,20 +49,24 @@ const float anti_coeff = (TIME_FACTOR-1.)/TIME_FACTOR;
 const float coeff2 = 1./TIME_FACTOR2;               // Coefficients for fall smoothing
 const float anti_coeff2 = (TIME_FACTOR2-1.)/TIME_FACTOR2;
 const int sample_period = 1000000/SAMPLING_FREQUENCY;
+const int elem_count = COLUMNS_COUNT/8;
+const int fft_size = COLUMNS_COUNT*2;
+const int array_size = COLUMNS_COUNT*ROWS_COUNT/8;
 
 // Global variables
-volatile int analogBuffer[128] = {0};         // Circular buffer for storing analogReads
+volatile int analogBuffer[fft_size] = {0};         // Circular buffer for storing analogReads
 volatile int analogBuffer_index = 0;          // Write index for analogBuffer, also used for reads
 volatile bool analogBuffer_availible = true;  // Memory busy flag for analogBuffer
-uint8_t displayBuffer[128] = {0};       // First buffer for storing LED matrix output
-uint8_t doubleBuffer[128]  = {0};       // Second buffer for storing LED matrix output
+uint8_t displayBuffer[array_size] = {0};       // First buffer for storing LED matrix output
+uint8_t doubleBuffer[array_size]  = {0};       // Second buffer for storing LED matrix output
 uint8_t *readBuffer = doubleBuffer;     // Pointer that specifies which buffer is to be read from
 uint8_t *writeBuffer = displayBuffer;   // Pointer that specifies which buffer is to be written to
 bool displayBuffer_availible = true;    // Memory busy flag for display buffer
 volatile int inputPin = 39;      // ADC pin, either 36(aux) or 39(microphone)
+int fft_power;
 
 // Function prototypes, explanations at bottom
-void flashDisplay(uint8_t frame[128], int interval = 5);
+void flashDisplay(uint8_t frame[array_size], int interval = 5);
 void analogBuffer_store(int val);
 
 // Core 0 thread
@@ -97,7 +108,7 @@ void IRAM_ATTR onTimer(){
   // accuracy the values must be stored in a contingency buffer. Then, when the interrupt
   // is triggered and the reading is over, the values are transferred from the contingency
   // buffer to analogBuffer.
-  static int contigBuffer[128];
+  static int contigBuffer[fft_size];
   static int contigBuffer_index = 0;
   if(!analogBuffer_availible){
     contigBuffer[contigBuffer_index] = analogRead(inputPin) - 2048;
@@ -128,6 +139,9 @@ void setup(){
   pinMode(36, INPUT);
   pinMode(0, INPUT);
 
+  fft_power = 0;
+  while(1 << fft_power != fft_size) fft_power++;
+
   // Intializes interrupt at user-set frequency
   timer = timerBegin(0, 80, true);
   timerAttachInterrupt(timer, &onTimer, true);
@@ -147,17 +161,17 @@ void setup(){
 }
 
 void loop(){
-  int8_t vReal[128];
-  int8_t vImag[128] = {0};
-  int preprocess[128];
+  int8_t vReal[fft_size];
+  int8_t vImag[fft_size] = {0};
+  int preprocess[fft_size];
   
   // Reads entire analog buffer for FFT calculations. This means a LOT of
   // redundant data but its necessary to because using new data every time
   // requires very long delays in total when recording at low frequencies.
   analogBuffer_availible = false;   // Closes off buffer to prevent corruption
   // Reads entire circular buffer, starting from analogBuffer_index
-  for(int i = 0; i < 128; i++){
-    preprocess[i] = analogBuffer[(i+analogBuffer_index)%128] / 16;
+  for(int i = 0; i < fft_size; i++){
+    preprocess[i] = analogBuffer[(i+analogBuffer_index)%fft_size] / 16;
   }
   analogBuffer_availible = true;    // Restores access to buffer
 
@@ -166,18 +180,16 @@ void loop(){
   // SHOULD produce usable 0th bin values (currenty 0.1uF capacitors in signal
   // path block low frequencies because they seemed to be really large anyway?)
   int sum = 0;
-  for(int i = 0; i < 128; i++) sum += preprocess[i];
-  int avg = sum / 128;
-  for(int i = 0; i < 128; i++) vReal[i] = preprocess[i] - avg;
+  for(int i = 0; i < fft_size; i++) sum += preprocess[i];
+  int avg = sum / fft_size;
+  for(int i = 0; i < fft_size; i++) vReal[i] = preprocess[i] - avg;
 
-
-  fix_fft(vReal,vImag,7,0); // Performs FFT calculations
-
+  fix_fft(vReal,vImag,fft_power,0); // Performs FFT calculations
 
   // Performs multiple operations: flattening, post-processing, and smoothing
-  static float buff[64];
-  uint8_t postprocess[64];
-  for(int iCol = 0; iCol < 64; iCol++){
+  static float buff[COLUMNS_COUNT];
+  uint8_t postprocess[COLUMNS_COUNT];
+  for(int iCol = 0; iCol < COLUMNS_COUNT; iCol++){
     // Combining imaginary and real data into a unified array
     postprocess[iCol] = SENSITIVITY*sqrt(vReal[iCol]*vReal[iCol] + vImag[iCol]*vImag[iCol]);
     // Logarithmic scaling to create more visible output display height of 16
@@ -197,11 +209,11 @@ void loop(){
 
   // Translating output data into column heights, which is entered into the buffer
   displayBuffer_availible = false;  // Blocks access to display buffer
-  for(int i = 0; i < 128; i++) writeBuffer[i] = 0;
-  for(int iCol = 0; iCol < 64; iCol++){  
-    int height = (postprocess[iCol]*16)/CAP;
-    for(int iRow = 0; iRow < 16; iRow++)
-      if(height >= 16-iRow || iRow == 15) writeBuffer[iRow*8 + iCol/8] |= 1 << (7-iCol%8);
+  for(int i = 0; i < array_size; i++) writeBuffer[i] = 0;
+  for(int iCol = 0; iCol < COLUMNS_COUNT; iCol++){  
+    int height = (postprocess[iCol]*ROWS_COUNT)/CAP;
+    for(int iRow = 0; iRow < ROWS_COUNT; iRow++)
+      if(height >= ROWS_COUNT-iRow || iRow == ROWS_COUNT-1) writeBuffer[iRow*elem_count + iCol/8] |= 1 << (7-iCol%8);
   }
   displayBuffer_availible = true;   // Restores access to display buffer
 
@@ -220,17 +232,17 @@ void loop(){
 // the flash interval the brighter the display (max unmeasured, but exists),
 // but can be asynchronously executed if needed. Bitbangs HUB12 protocol
 // with hardware SPI and additonal pins.
-void flashDisplay(uint8_t frame[128], int interval){
-  for(uint8_t iRow = 0; iRow < 16; iRow++){
+void flashDisplay(uint8_t frame[array_size], int interval){
+  for(uint8_t iRow = 0; iRow < ROWS_COUNT; iRow++){
     // Loads in a row, each element/column holding 8 pixels from left to right
-    uint8_t column[8];
-    for(int iCol = 0; iCol < 8; iCol++) column[iCol] = frame[8*iRow + iCol];
+    uint8_t column[elem_count];
+    for(int iCol = 0; iCol < elem_count; iCol++) column[iCol] = frame[elem_count*iRow + iCol];
 
     // Outputting over HUB12
     digitalWrite(ENABLEPIN, HIGH);  // Turns display off (redundant?)
     
     // Sends data column by column, protocol emulated by SPI mode 3
-    for(int iCol = 0; iCol < 8; iCol++) SPI.transfer(column[iCol]);
+    for(int iCol = 0; iCol < elem_count; iCol++) SPI.transfer(column[iCol]);
     
     digitalWrite(LATCHPIN, LOW);
     digitalWrite(LATCHPIN, HIGH);
@@ -262,7 +274,7 @@ void analogBuffer_store(int val){
 
   // Increments index then uses modulo to limit range
   analogBuffer_index++;
-  analogBuffer_index %= 128;
+  analogBuffer_index %= fft_size;
 }
 // Function note: Currently, analogBuffer_index is also used as the reference
 // in order to read the entire array in chronological order.
