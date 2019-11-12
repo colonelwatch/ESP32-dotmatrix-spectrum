@@ -33,7 +33,7 @@
 #define SAMPLING_FREQUENCY 10000      // Frequency at which sampling interrupt will
                                       //  be called, actual output range will be
                                       //  limited to half because of Nyquist.
-#define SENSITIVITY 1.45              // FFT output multiplier before post-processing.
+#define SENSITIVITY 1.65              // FFT output multiplier before post-processing.
 #define DEBOUNCE 500                  // Debounce time in milliseconds for BOOT button
 
 // Global constants
@@ -149,7 +149,6 @@ void setup(){
 void loop(){
   int8_t vReal[128];
   int8_t vImag[128] = {0};
-  static float buff[64];
   int preprocess[128];
   
   // Reads entire analog buffer for FFT calculations. This means a LOT of
@@ -176,6 +175,7 @@ void loop(){
 
 
   // Performs multiple operations: flattening, post-processing, and smoothing
+  static float buff[64];
   uint8_t postprocess[64];
   for(int iCol = 0; iCol < 64; iCol++){
     // Combining imaginary and real data into a unified array
@@ -214,7 +214,7 @@ void loop(){
 
 // Function defintions
 
-// Flashes 64*16 HUB12 display with an output specified by the passed array.
+// Flashes 64*16 HUB08 display with an output specified by the passed array.
 // Reads the array "row" by "row", left to right. (Each row is 64 bits, or
 // 8 uint8_t elements long.) Should be run continuously, so that the higher
 // the flash interval the brighter the display (max unmeasured, but exists),

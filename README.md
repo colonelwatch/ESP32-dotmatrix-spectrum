@@ -2,7 +2,7 @@
 
 ![Main Image](images/Main.jpg)
 
-The goal of this Arduino program was initially try implementing the [fix_fft](https://github.com/kosme/fix_fft) library on a 32-bit microcontroller, because it was updated recently to support them, but it has since expanded into its own project. In this case, I used a dual-core ESP32, and that way I could dedicate a core to driving a 64x16 LED matrix display on the HUB08 protocol. The project is generally complete, but from here on I intend to add some unrelated features on my own device, though these won't go on this repo.
+The goal of this Arduino program was initially to try implementing the [fix_fft](https://github.com/kosme/fix_fft) library on a 32-bit microcontroller because it was updated recently to support them, but it has since expanded into its own project. In this case, I used a dual-core ESP32, and that way I could dedicate a core to driving a 64x16 LED matrix display on the HUB08 protocol. The project is generally complete, but from here on I intend to add some unrelated features on my own device, though these won't go on this repo.
 
 ## Explanation
 Except for the LED matrix driver and some ESP32-specific lines, this program is generally the same as my previous project, [attiny85-spectrum](https://github.com/colonelwatch/attiny85-spectrum). However, this time I've implemented a dynamic sampling system that increased the program's output rate by an *order of magnitude*—that is, in most music visualization projects a lot of potential processing time is wasted because the microcontroller must wait on the ADC to collect enough samples for an FFT. One can *try* to fix this by raising the ADC's clock, but this leads to an undesirable increase in the maximum frequency, way beyond normal for music. Alternatively, the same problem is caused when the sampling is already too fast, and long blocking delays are needed to maintain a desired sampling rate.
@@ -16,14 +16,11 @@ To eliminate this problem, my solution samples continuously at the desired frequ
 Before I implemented this method, the ESP32 could generate 100 fix_fft outputs per second; it can now do **1627.8** per second (which exceeded the ~~458~~1024.2Hz refresh rate of my LED matrix). This dynamic sampling trick can be applied on any microcontroller using interrupts, including the Arduino Uno (after raising the ADC clock).
 
 ## Implementation
-Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. (I managed to input music by using the 2n3904 amplifier described in attiny85-spectrum.) Wire the ESP32 into the HUB08 interface 64x16 LED matrix, using the pinouts in the .ino file. 
+Feed a 3.3V peak-to-peak amplified signal with DC bias into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. (I managed to input music or a ambient noise by using the below schematic.) Wire the ESP32 into the HUB08 interface 64x16 LED matrix, using the pinouts in the .ino file.
+
+!(Schematic)[images/schematic.png]
 
 ## Demonstration
 
 [![ESP32-dotmatrix-spectrum](http://img.youtube.com/vi/qoQYLd-diwM/0.jpg)](https://www.youtube.com/watch?v=qoQYLd-diwM)
-
-## Limitations/TO-DO
-
-- The LED matrix might be limited to 458Hz because the microcontroller needs time to copy into the second buffer (Test if this is true, and if true attempting a page-flipping system instead)
-	- Alternatively, use a different type of display, since 458Hz is tough to appreciate on such a limited resoluton!
 
