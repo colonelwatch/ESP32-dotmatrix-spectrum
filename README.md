@@ -18,9 +18,9 @@ Before I implemented this method, the ESP32 could generate 100 fix_fft outputs p
 ## Implementation
 Feed an amplified signal with DC bias that fits between GND and 3.3V into either GPIO36 or GPIO39. By pressing the BOOT button on the ESP32, you can switch between the two. Wire the ESP32 into the HUB08 interface 64x16 LED matrix, using the pinouts in the .ino file.
 
-![Schematic](images/schematic.png)
+I used the below schematic to amplify the signal. The 100nF capacitors at the end attenuates the signal because my setup was getting noise above the FFT library's floor for some reason. Because of this, you may need to change the divider in line 160 if you signal has a higher level.
 
-I used the above schematic to amplify the signal. The 100nF capacitors at the end attenuates the signal because my setup was getting noise above the FFT library's floor for some reason. Because of this, you may need to change the divider in line 160 if you signal has a higher level.
+![Schematic](images/schematic.png)
 
 ## Demonstration
 
